@@ -1,0 +1,882 @@
+---
+title: "Selection on traits with error"
+author: "Yimen"
+date: "11/25/2019"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+require(MASS)
+require(arm)
+require(tidyr)
+require(MCMCglmm)
+require(ggplot2)
+require(dplyr)
+library(asreml)
+library(parallel)
+require(gridExtra)
+require(ggpubr)
+rm(list=ls())
+```
+
+Linear selection gradients
+
+```{r, label="scenario 1 Functions", include=FALSE, cache=TRUE}
+model.1<-function(x){
+mod1<-lm(rw~obs.z1, data=x)
+res<-data.frame(model="1obs", Vs=x$V_m.error[1], est=coef(mod1)[2])
+as.data.frame(res)
+}
+
+model.mean<-function(x){
+mod.mean<-lm(rw~mean.z, data=x)
+res<-data.frame(model="Mean",Vs=x$V_m.error[1],est=coef(mod.mean)[2])
+res
+}
+
+model.MCMC2<-function(x){
+require(MCMCglmm)
+prior1 <- list(R=list(V=diag(2), nu=0.002, fix=2), G=list(G1=list(V=diag(2), nu=0.002)))
+prior1$R$V[2,2]<-0.0001
+
+modbi <- MCMCglmm(cbind(t, w) ~ (trait-1), random = ~us(trait-1):ID, rcov = ~idh(trait-1):units, family = rep("gaussian", 2), data=x, prior = prior1,nitt=100500, thin=100, burnin=500)
+  est<-posterior.mode(modbi$VCV[,2]/modbi$VCV[,1]*sqrt(modbi$VCV[,1])/modbi$Sol[,2])
+  res<-data.frame(model="Bi.MCMC", Vs=x$V_m.error[1], est=est)
+  res
+  }
+
+
+init_E_B_fit_cor <- c(0.1,
+                      1,1)
+names(init_E_B_fit_cor) <- c("U",
+                             "P","P")
+
+init_E_B_fit_res <- c(0,
+                      1, 1e-08)
+names(init_E_B_fit_res) <- c("F",
+                             "P","F")
+
+model.REML<-function(x){
+res<-data.frame(model="Bi.REML", Vs=x$V_m.error[1], est=NA)
+tryCatch({
+modASREml<- asreml(cbind(t,w) ~ trait, random =~ ID:corgh(trait, init = init_E_B_fit_cor) + us(trait, init = init_E_B_fit_cor):ped(ANIMAL), residual =~ units:corgh(trait, init= init_E_B_fit_res), data = x, maxiter = 500)
+
+v<-summary(modASREml)$varcomp[,c("component")]
+c1<-v[1]*sqrt(v[2])*sqrt(v[3])
+est<-c1/v[2]*sqrt(v[2])/coef(modASREml)$fixed[2]
+res$est=est
+}, error=function(e){})
+res
+}
+
+R<-function(x){
+library(arm)
+modR2<-lmer(t ~1 +(1|ID), data=x)
+VI2<-VarCorr(modR2)$ID[1,1]
+VR2<-attr(VarCorr(modR2), "sc")^2
+Rt<-VI2/(VI2+VR2)
+Rtm<-VI2/(VI2+VR2/3)
+res<-data.frame(Rt=Rt, Rtm=Rtm)
+res
+}
+
+```
+
+```{r, label="scenario 1 Simualte data", include=FALSE, cache=TRUE}
+
+n.ind<-800
+n.sim<-100
+n<-c(0,n.sim)
+
+Vs_m.error<-c(7, 1.28571) 
+V.trait<-c(3)
+
+mean.trait<-0
+
+B1_z<-0.3
+B1_t<-B1_z/sqrt(V.trait)*2
+
+data1<-list()
+data2<-list()
+
+for(j in 1:length(
+Vs_m.error)){
+V_m.error<-
+Vs_m.error[j]
+for(i in 1:n.sim){
+d<-data.frame(ID=1:n.ind, t=rnorm(n.ind, mean.trait, sqrt(V.trait)))
+d$z<-scale(d$t)
+d$w<- 2 + d$t*B1_t + rnorm(n.ind, 0, sqrt(0.1))-mean(d$t*B1_t + rnorm(n.ind, 0, sqrt(0.1)))
+d$rw<-d$w/mean(d$w)
+
+d$obs.t1<-rnorm(n.ind, d$t, sqrt(V_m.error))
+d$obs.t2<-rnorm(n.ind, d$t, sqrt(V_m.error))
+d$obs.t3<-rnorm(n.ind, d$t, sqrt(V_m.error))
+
+m<-mean(c(d$obs.t1,d$obs.t2,d$obs.t3))
+sd<-sd(c(d$obs.t1,d$obs.t2,d$obs.t3))
+
+d$obs.z1<-(d$obs.t1-m)/sd
+d$obs.z2<-(d$obs.t2-m)/sd
+d$obs.z3<-(d$obs.t3-m)/sd
+
+d$mean.t<-apply(d[,c("obs.t1", "obs.t2", "obs.t3")],1,mean)
+d$mean.z<-scale(d$mean.t)
+
+d2 <- gather(d, obs, t, obs.t1:obs.t3, factor_key=TRUE)
+d2$w[(n.ind+1):nrow(d2)]<-NA
+d2$ID<-as.factor(d2$ID)
+
+d$V.trait<-V.trait
+d$V_m.error<-
+Vs_m.error[j]
+d$mean.trait<-mean.trait
+
+d2$V.trait<-V.trait
+d2$V_m.error<-
+Vs_m.error[j]
+d2$mean.trait<-mean.trait
+
+data1[[i+n[j]]]<-d
+data2[[i+n[j]]]<-d2
+}
+}
+
+#save.image("/home/yi/Dropbox/SelectionNiels/Models1MCMC.RData")
+
+```
+
+```{r, label="scenario 1 Analyze data local", include=FALSE, cache=TRUE}
+
+mod1<-do.call(rbind.data.frame,mclapply(data1, model.1, mc.cores=3))
+modmean<-do.call(rbind.data.frame,mclapply(data1, model.mean, mc.cores=3))
+
+mod1.corrected<-mod1
+mod1.corrected$model<-"1corrected"
+
+modmean.corrected<-mod1
+modmean.corrected$model<-"mean.corrected"
+
+R<-do.call(rbind.data.frame,mclapply(data2, R, mc.cores=3))
+mod1.corrected$est<-mod1$est/sqrt(R$Rt)
+modmean.corrected$est<-modmean$est/sqrt(R$Rtm)
+```
+
+```{r, label="scenario 1 Analyze data remote", include=FALSE, cache=TRUE}
+
+require(arm)
+require(MCMCglmm)
+require(parallel)
+
+setwd("//tsclient/yi/Dropbox/SelectionNiels")
+load("Models1MCMC.RData")
+cl <- makeCluster(getOption("cl.cores", 12))
+
+mod1<-do.call(rbind.data.frame, parLapply(cl, data1, model.1))
+
+modmean<-do.call(rbind.data.frame, parLapply(cl, data1, model.mean))
+
+modMCMC<-do.call(rbind.data.frame, parLapply(cl, data2, model.MCMC2))
+
+mod1.corrected<-mod1
+mod1.corrected$model<-"1corrected"
+
+modmean.corrected<-mod1
+modmean.corrected$model<-"mean.corrected"
+
+R<-do.call(rbind.data.frame, parLapply(cl, data2, R))
+mod1.corrected$est<-mod1$est/sqrt(R$Rt)
+modmean.corrected$est<-modmean$est/sqrt(R$Rtm)
+
+#save.image("Models1.RData")
+
+
+```
+
+```{r, label="Plot scenario 1", echo=FALSE}
+load("/home/yi/Dropbox/SelectionNiels/Models1.RData")
+n.ind<-10000000
+d<-data.frame(ID=1:n.ind, t=rnorm(n.ind, mean.trait, sqrt(V.trait)))
+d$z<-scale(d$t)
+d$w<- 2 + d$t*B1_t-mean(d$t*B1_t)
+d$rw<-d$w/mean(d$w)
+exp<-coef(lm(rw~z, data=d))
+
+simres<-rbind(mod1, modmean, mod1.corrected, modmean.corrected, modMCMC)
+simres$bias<-(simres$est-exp[2])/exp[2]*100
+simres2<-simres[complete.cases(simres$model),]
+simres2$Vs<-as.factor(round(3/(simres2$Vs+3),1))
+
+p1<- ggplot(simres2, aes(x=Vs, y=bias, fill=model)) +  geom_boxplot() +labs(title="", x="Repeatability", y = "% Bias linear selection", fill="Model") + theme_classic() + geom_hline(yintercept=0, linetype="dashed")  +scale_fill_manual(values=c("white", "grey", "black", "darkblue", "darkgreen"), 
+                       name="Models",
+                       breaks=c("1obs", "Mean", "1corrected", "mean.corrected" ,"Bi.MCMC"),
+                       labels=c("1obs", "Mean", "1corrected", "MeanCorrected" ,"Multivariate"))  + theme(legend.position = "none")+ ylim(-70,70)
+  
+p1
+
+simres2$MR<-paste(simres2$model, simres2$Vs)
+tapply(simres2$, simres2$MR, mean)
+
+```
+
+Quadratic selection gradients
+
+```{r, label="scenario 2 Functions", include=FALSE, cache=TRUE}
+model.1<-function(x){
+mod1<-lm(rw~obs.z1 + obs.z12 , data=x)
+res<-data.frame(model="1obs", Vs=x$V_m.error[1], est1=coef(mod1)[2],est2=coef(mod1)[3])
+res
+}
+
+model.mean<-function(x){
+mod.mean<-lm(rw~mean.z + mean.z2, data=x)
+res<-data.frame(model="Mean", Vs=x$V_m.error[1], est1=coef(mod.mean)[2],est2=coef(mod.mean)[3])
+res
+}
+
+model.MCMC<-function(x){
+require(MCMCglmm)
+res<-data.frame(model="Bi.MCMCA", Vs=x$V_m.error[1],est1=NA, est2=NA)
+prior1 <- list(G=list(G1=list(V=diag(3), nu=3, alpha.mu=c(0,0,0), alpha.V=diag(3)*100)),
+                R=list(V=diag(3), nu=2, fix=3))
+
+prior1$R$V[3,3]<-0.000001
+
+tryCatch({
+modbi <- MCMCglmm(cbind(t, t2, w) ~ (trait-1), random = ~us(trait-1):ID, rcov = ~us(trait-1):units, family = rep("gaussian", 3), data=x, prior = prior1,nitt=100500, thin=100, burnin=500)
+
+  rescr<-matrix(NA, 1000,2)
+for(k in 1:1000){
+m<-matrix(modbi$VCV[k,1:9],3,3)
+m1<-m[1:2,1:2]
+m2<-c(m[1,3],m[2,3])
+rescr[k,]<-(solve(m1)%*%m2)*sqrt(diag(m1))/modbi$Sol[k,3]
+}
+cr<-posterior.mode(as.mcmc(rescr))
+res$est1=cr[1]
+res$est2=cr[2]
+}, error=function(e){})
+res
+}
+
+
+model.MCMC2<-function(x){
+require(MCMCglmm)
+res<-data.frame(model="Bi.MCMCB", Vs=x$V_m.error[1],est1=NA, est2=NA)
+prior1 <- list(G=list(G1=list(V=diag(3), nu=0.002)),
+                R=list(V=diag(3), nu=0.002, fix=3))
+prior1$R$V[3,3]<-0.00001
+
+tryCatch({
+modbi <- MCMCglmm(cbind(t, t2, w) ~ (trait-1), random = ~us(trait-1):ID, rcov = ~us(trait-1):units, family = rep("gaussian", 3), data=x, prior = prior1,nitt=100500, thin=100, burnin=500)
+
+  rescr<-matrix(NA, 1000,2)
+for(k in 1:1000){
+m<-matrix(modbi$VCV[k,1:9],3,3)
+m1<-m[1:2,1:2]
+m2<-c(m[1,3],m[2,3])
+rescr[k,]<-(solve(m1)%*%m2)*sqrt(diag(m1))/modbi$Sol[k,3]
+}
+cr<-posterior.mode(as.mcmc(rescr))
+res<-data.frame(model="Bi.MCMC", Vs=x$V_m.error[1],est1=cr[1], est2=cr[2])
+
+}, error=function(e){})
+res
+}
+
+init_E_B_fit_cor <- c(0.1,
+                      0.1,0.1,
+                      1,1,1)
+names(init_E_B_fit_cor) <- c("U",
+                             "U","U",
+                             "P","P","P")
+
+init_E_B_fit_res <- c(0.1,
+                        0,   0,
+                      0.1, 0.1, 1e-08)
+names(init_E_B_fit_res) <- c("U",
+                             "F","F",
+                             "P","P","F")
+
+model.REML<-function(x){
+res<-data.frame(model="Bi.REML", Vs=x$V_m.error[1],est1=NA, est2=NA)
+   tryCatch({
+modASREml<- asreml(cbind(t,t2,w) ~ trait, random =~ ID:corgh(trait, init = init_E_B_fit_cor),
+                          residual =~ units:corgh(trait, init = init_E_B_fit_res),
+                          data = x,
+                          maxiter = 500)
+
+v<-summary(modASREml)$varcomp[,c("component")]
+c1<-v[1]*sqrt(v[4])*sqrt(v[5])
+c2<-v[2]*sqrt(v[4])*sqrt(v[6])
+c3<-v[3]*sqrt(v[5])*sqrt(v[6])
+m1<-matrix(c(v[4],c1,c1,v[5]),2,2) 
+m2<-c(c2,c3)
+S<-solve(m1)%*%m2
+est1<-S[1]*sqrt(v[4])/coef(modASREml)$fixed[3]
+est2<-S[2]*sqrt(v[5])/coef(modASREml)$fixed[3]
+res$est1<-est1
+res$est2<-est2
+
+}, error=function(e){})
+res
+}
+
+model.exp<-function(x){
+mod.exp<-lm(rw~z +z2 , data=x)
+res<-data.frame(model="Exp", Vs=x$V_m.error[1], est1=coef(mod.exp)[2],est2=coef(mod.exp)[3])
+res
+}
+
+R<-function(x){
+library(lme4)
+modR2<-lmer(t ~1 +(1|ID), data=x)
+VI2<-VarCorr(modR2)$ID[1,1]
+VR2<-attr(VarCorr(modR2), "sc")^2
+
+R2tm<-(VI2/(VI2+VR2/3))^2
+
+modR2<-lmer(t2 ~1 +(1|ID), data=x)
+VI2<-VarCorr(modR2)$ID[1,1]
+VR2<-attr(VarCorr(modR2), "sc")^2
+Rt2<-VI2/(VI2+VR2)
+Rtm2<-VI2/(VI2+(VR2/3))
+res<-data.frame(Rt2=Rt2, Rtm2=Rtm2, R2tm=R2tm)
+res
+}
+
+```
+
+```{r, label="scenario 2 simulation", include=FALSE, cache=TRUE}
+
+data1<-list()
+data2<-list()
+
+n.ind<-800
+n.sim<-100
+n<-c(0,n.sim)
+
+Vs_m.error<-c(7, 1.28571) 
+V.trait<-c(3)
+
+mean.trait<-0
+
+B1_z<-1.9
+B2_z2<--0.3
+
+B1_t<-B1_z/sqrt(V.trait)*2
+B2_t2<-B2_z2/sqrt(2*(V.trait^2 + 2*V.trait*mean.trait^2))*2
+
+
+for(j in 1:length(Vs_m.error)){
+V_m.error<-Vs_m.error[j]
+
+for(i in 1:n.sim){
+d<-data.frame(ID=1:n.ind, t=rnorm(n.ind, mean.trait, sqrt(V.trait)))
+d$t2<-d$t^2
+d$z<-scale(d$t)
+d$z2<-scale(d$t2)
+d$w<- 2 + d$t*B1_t + d$t2*B2_t2 + rnorm(n.ind, 0, sqrt(1))-(mean(d$t*B1_t + d$t2*B2_t2 + rnorm(n.ind, 0, sqrt(1))))
+d$rw<-d$w/mean(d$w)
+ 
+d$obs.t1<-rnorm(n.ind, d$t, sqrt(V_m.error))
+d$obs.t2<-rnorm(n.ind, d$t, sqrt(V_m.error))
+d$obs.t3<-rnorm(n.ind, d$t, sqrt(V_m.error))
+
+d$obs.t12<-d$obs.t1^2
+d$obs.t22<-d$obs.t2^2
+d$obs.t32<-d$obs.t3^2
+
+m<-mean(c(d$obs.t1,d$obs.t2,d$obs.t3))
+sd<-sd(c(d$obs.t1,d$obs.t2,d$obs.t3))
+
+m2<-mean(c(d$obs.t12,d$obs.t22,d$obs.t33))
+sd2<-sd(c(d$obs.t12,d$obs.t22,d$obs.t33))
+
+d$obs.z1<-(d$obs.t1-m)/sd
+d$obs.z2<-(d$obs.t2-m)/sd
+d$obs.z3<-(d$obs.t3-m)/sd
+
+d$obs.z12<-(d$obs.t12-m2)/sd2
+d$obs.z22<-(d$obs.t22-m2)/sd2
+d$obs.z32<-(d$obs.t32-m2)/sd2
+
+d$mean.t<-apply(d[,c("obs.t1", "obs.t2", "obs.t3")],1,mean)
+d$mean.t2<-d$mean.t^2
+
+d$mean.z<-scale(d$mean.t)
+d$mean.z2<-scale(d$mean.t2)
+
+d2.a <- gather(d, obs, t, obs.t1:obs.t3, factor_key=TRUE)
+d2<-d2.a[,c("ID", "w", "t")]
+d2.b <- gather(d, obs, t2, obs.t12:obs.t32, factor_key=TRUE)
+
+d2$t2<-d2.b$t2
+d2$w[(n.ind+1):nrow(d2)]<-NA
+d2$ID<-as.factor(d2$ID)
+
+d$V_m.error<-V_m.error
+d2$V_m.error<-V_m.error
+
+data1[[i+n[j]]]<-d
+data2[[i+n[j]]]<-d2
+}
+}
+#save.image("/home/yi/Dropbox/SelectionNiels/datasets2.RData")
+
+```
+
+```{r, label="scenario 2 Analyze data local", include=FALSE, cache=TRUE}
+
+mod1.2<-do.call(rbind.data.frame,mclapply(data1, model.1, mc.cores=3))
+modmean.2<-do.call(rbind.data.frame,mclapply(data1, model.mean, mc.cores=3))
+
+R<-do.call(rbind.data.frame,mclapply(data2, R, mc.cores=3))
+
+mod1.2.corrected<-mod1.2
+mod1.2.corrected$model<-"1corrected"
+mod1.2.corrected$est2<-mod1.2$est2/sqrt(R$Rt2)
+
+modmean.2.corrected<-modmean.2
+modmean.2.corrected$model<-"mean.corrected"
+modmean.2.corrected$est2<-modmean.2$est2/sqrt(R$R2tm)
+```
+
+```{r, label="scenario 2 Analyze data remote", include=FALSE, cache=TRUE}
+
+library(arm)
+library(MCMCglmm)
+library(parallel)
+
+setwd("//tsclient/yi/Dropbox/SelectionNiels")
+load("datasets2.RData")
+cl <- makeCluster(getOption("cl.cores", 12))
+
+mod1<-do.call(rbind.data.frame, parLapply(cl, data1, model.1))
+
+modmean<-do.call(rbind.data.frame, parLapply(cl, data1, model.mean))
+
+modMCMC<-do.call(rbind.data.frame, parLapply(cl, data2, model.MCMC2))
+
+mod1.corrected<-mod1
+modmean.corrected<-modmean
+
+R<-do.call(rbind.data.frame, parLapply(cl, data2, R))
+
+mod1.corrected$model<-"1corrected"
+mod1.corrected$est2<-mod1$est2/sqrt(R$Rt2)
+modmean.corrected$model<-"mean.corrected"
+modmean.corrected$est2<-modmean$est2/sqrt(R$R2tm)
+
+#save.image("Models2.RData")
+
+
+```
+
+```{r, label="Plot scenario 2", echo=FALSE}
+load("/home/yi/Dropbox/SelectionNiels/Models2.RData")
+
+n.ind<-10000000
+d<-data.frame(ID=1:n.ind, t=rnorm(n.ind, mean.trait, sqrt(V.trait)))
+d$t2<-d$t^2
+d$z<-scale(d$t)
+d$z2<-scale(d$t2)
+
+d$w<- 2 + d$t*B1_t + d$t2*B2_t2-(mean(d$t*B1_t + d$t2*B2_t2))
+d$rw<-d$w/mean(d$w)
+exp<-coef(lm(rw~z+z2, data=d))
+
+simres.2<-rbind(mod1, modmean, mod1.corrected, modmean.corrected, modMCMC)
+
+simres.2$model2<-as.factor(as.numeric(simres.2$model))
+simres.2$bias1<-(simres.2$est1-exp[2])/exp[2]*100
+simres.2$bias2<-(simres.2$est2-exp[3])/exp[3]*100
+simres.2<-simres.2[complete.cases(simres.2$model),]
+simres.2$Vs<-round(3/(simres.2$Vs+3),1)
+
+p2<- ggplot(simres.2, aes(x=factor(Vs), y=bias2, fill=model)) + 
+ geom_boxplot() +labs(title="", x="Repeatability", y = "% Bias quadratic selection", fill="Model") + theme_classic() + geom_hline(yintercept=0, linetype="dashed")  +scale_fill_manual(values=c("white", "grey", "black", "darkblue", "darkgreen"), 
+                       name="Models",
+                       breaks=c("1obs", "Mean", "1corrected", "mean.corrected" ,"Bi.MCMC"),
+                       labels=c("1obs", "Mean", "1corrected", "MeanCorrected" ,"Multivariate"))  + theme(legend.position = "none") + ylim(-250,250)
+p2
+```
+
+
+Correlational selection gradients
+```{r, label="scenario 3 Functions", include=FALSE, cache=TRUE}
+model3<-function(x){
+mod1<-lm(rw~obs.z1 + obs.z12 + obs.y1 + obs.y12 + obs.y1*obs.z1 , data=x)
+res<-data.frame(model="1obs", Vs=x$V_m.error[1], est1=coef(mod1)[2],est2=coef(mod1)[3], est3=coef(mod1)[4],est4=coef(mod1)[5], est5=coef(mod1)[6])
+res
+}
+
+model3.mean<-function(x){
+mod.mean<-lm(rw~mean.z + mean.z2 + mean.y + mean.y2 + mean.z*mean.y, data=x)
+res<-data.frame(model="Mean", Vs=x$V_m.error[1], est1=coef(mod.mean)[2],est2=coef(mod.mean)[3], est3=coef(mod.mean)[4],est4=coef(mod.mean)[5], est5=coef(mod.mean)[6])
+res
+}
+
+model3.MCMC<-function(x){
+require(MCMCglmm)
+res<-data.frame(model="Bi.MCMCA", Vs=x$V_m.error[1],est1=NA, est2=NA)
+
+prior1 <- list(G=list(G1=list(V=diag(6), nu=6, alpha.mu=c(0,0,0,0,0,0), alpha.V=diag(6)*100)),
+                R=list(V=diag(6), nu=6, fix=6))
+
+prior1$R$V[6,6]<-0.000001
+
+tryCatch({
+modbi <- MCMCglmm(cbind(t, t2, x, x2, tx, w) ~ (trait-1), random = ~us(trait-1):ID, rcov = ~us(trait-1):units, family = rep("gaussian", 6), data=x, prior = prior1,nitt=30050, thin=30, burnin=50)
+
+rescr<-matrix(NA, 1000,5)
+for(k in 1:1000){
+m<-matrix(modbi$VCV[k,1:36],6,6)
+m1<-m[1:5,1:5]
+m2<-c(m[1,6],m[2,6],m[3,6], m[4,6], m[5,6] )
+rescr[k,]<-(solve(m1)%*%m2)*sqrt(diag(m1))/modbi$Sol[k,6]
+}
+cr<-posterior.mode(as.mcmc(rescr))
+res$est1=cr[1]
+res$est2=cr[2]
+res$est3=cr[3]
+res$est4=cr[4]
+res$est5=cr[5]
+}, error=function(e){})
+res
+}
+
+model3.MCMCB<-function(x){
+require(MCMCglmm)
+res<-data.frame(model="Bi.MCMCB", Vs=x$V_m.error[1],est1=NA, est2=NA)
+prior1 <- list(G=list(G1=list(V=diag(6), nu=0.002)),
+                R=list(V=diag(6), nu=0.002, fix=6))
+prior1$R$V[6,6]<-0.00001
+
+tryCatch({
+modbi <- MCMCglmm(cbind(t, t2, x, x2, tx, w) ~ (trait-1), random = ~us(trait-1):ID, rcov = ~us(trait-1):units, family = rep("gaussian", 6), data=x, prior = prior1,nitt=10050, thin=10, burnin=50)
+
+rescr<-matrix(NA, 1000,5)
+for(k in 1:1000){
+m<-matrix(modbi$VCV[k,1:36],6,6)
+m1<-m[1:5,1:5]
+m2<-c(m[1,6],m[2,6],m[3,6], m[4,6], m[5,6] )
+rescr[k,]<-(solve(m1)%*%m2)*sqrt(diag(m1))/modbi$Sol[k,6]
+}
+cr<-posterior.mode(as.mcmc(rescr))
+res$est1=cr[1]
+res$est2=cr[2]
+res$est3=cr[3]
+res$est4=cr[4]
+res$est5=cr[5]
+}, error=function(e){})
+res
+}
+
+
+init_E_B_fit_cor <- c(0.1,
+                      0.1,0.1,
+                      0.1,0.1,0.1,
+                      0.1,0.1,0.1,0.1,
+                      0.1,0.1,0.1,0.1,0.1,
+                        1,  1,  1,  1,  1,  1)
+names(init_E_B_fit_cor) <- c("U",
+                             "U","U",
+                             "U","U","U",
+                             "U","U","U","U",
+                             "U","U","U","U","U",
+                             "P","P","P","P","P","P")
+
+init_E_B_fit_res <- c(0.1,
+                      0.1,0.1,
+                      0.1,0.1,0.1,
+                      0.1,0.1,0.1,0.1,
+                        0,  0,  0,  0 , 0,
+                        1,  1,  1,  1,  1,  1e-08)
+
+names(init_E_B_fit_res) <- c("U",
+                             "U","U",
+                             "U","U","U",
+                             "U","U","U","U",
+                             "F","F","F","F","F",
+                             "P","P","P","P","P","F")
+
+model.REML<-function(x){
+res<-data.frame(model="Bi.REML", Vs=x$V_m.error[1],est1=NA, est2=NA)
+   tryCatch({
+modASREml<- asreml(cbind(t,t2, x, x2, tx, w) ~ trait, random =~ ID:corgh(trait, init = init_E_B_fit_cor),
+                          residual =~ units:corgh(trait, init = init_E_B_fit_res),
+                          data = x,
+                          maxiter = 500)
+
+v<-summary(modASREml)$varcomp[,c("component")]
+c1<-v[1]*sqrt(v[4])*sqrt(v[5])
+c2<-v[2]*sqrt(v[4])*sqrt(v[6])
+c3<-v[3]*sqrt(v[5])*sqrt(v[6])
+m1<-matrix(c(v[4],c1,c1,v[5]),2,2) 
+m2<-c(c2,c3)
+S<-solve(m1)%*%m2
+est1<-S[1]*sqrt(v[4])/coef(modASREml)$fixed[3]
+est2<-S[2]*sqrt(v[5])/coef(modASREml)$fixed[3]
+res$est1<-est1
+res$est2<-est2
+
+}, error=function(e){})
+res
+}
+
+model.exp<-function(x){
+mod.exp<-lm(rw~z +z2 + y + y2 + y*z, data=x)
+res<-data.frame(model="Exp", Vs=x$V_m.error[1], est1=coef(mod.exp)[2],est2=coef(mod.exp)[3], est3=coef(mod.exp)[4],est4=coef(mod.exp)[5], est5=coef(mod.exp)[6])
+res
+}
+
+R3<-function(x){
+library(arm)
+modx<-lmer(x ~1 +(1|ID), data=x)
+VIx<-VarCorr(modx)$ID[1,1]
+VRx<-attr(VarCorr(modx), "sc")^2
+
+modt<-lmer(x ~1 +(1|ID), data=x)
+VIt<-VarCorr(modt)$ID[1,1]
+VRt<-attr(VarCorr(modt), "sc")^2
+
+Rtx<-(VIt*VIx)/((VIt+VRt)*(VIx+VRx))
+Rtxm<-(VIt*VIx)/((VIt+VRt/3)*(VIx+VRx/3))
+
+  
+modR2<-lmer(tx ~1 +(1|ID), data=x)
+VI2<-VarCorr(modR2)$ID[1,1]
+VR2<-attr(VarCorr(modR2), "sc")^2
+Rtx2<-VI2/(VI2+VR2)
+Rtxm2<-VI2/(VI2+VR2/3)
+
+res<-data.frame(Rtx=Rtx,Rtx2=Rtx2, Rtxm=Rtxm, Rtxm2=Rtxm2)
+res
+}
+
+```
+
+```{r, label="scenario 3 simulation", include=FALSE, cache=TRUE}
+data1<-list()
+data2<-list()
+
+n.ind<-800
+n.sim<-100
+n<-c(0,n.sim)
+
+Vs_m.error<-c(7, 1.28571) 
+V.trait<-c(3)
+
+mean.trait<-0
+
+B1_z<-1
+B2_z2<--0.3
+B1_z1z2<-0.3
+
+B1_t<-B1_z/sqrt(V.trait)*2
+B2_t2<-B2_z2/sqrt(2*(V.trait^2 + 2*V.trait*mean.trait^2))*2
+B1_t1t2<-B1_z1z2/sqrt(2*(V.trait^2 + 2*V.trait*mean.trait^2))*2
+
+for(j in 1:length(Vs_m.error)){
+V_m.error<-Vs_m.error[j]
+
+for(i in 1:n.sim){
+
+m<-matrix(NA,2,2)
+m[1,1]<-m[2,2]<-V.trait
+m[1,2]<-m[2,1]<-0
+ts<-mvrnorm(n.ind, c(mean.trait, mean.trait), m)
+  
+d<-data.frame(ID=1:n.ind, t=ts[,1], x=ts[,2])
+d$t2<-d$t^2
+d$x2<-d$x^2
+
+d$z<-scale(d$t)
+d$z2<-scale(d$t2)
+
+d$y<-scale(d$x)
+d$y2<-scale(d$x2)
+
+d$w<- 2 + d$t*B1_t + d$t2*B2_t2 +   d$x*B1_t + d$x2*B2_t2 + B1_t1t2*d$t*d$x + rnorm(n.ind, 0, sqrt(1))-mean(d$t*B1_t + d$t2*B2_t2 +   d$x*B1_t + d$x2*B2_t2 + B1_t1t2*d$t*d$x + rnorm(n.ind, 0, sqrt(1)))
+
+d$rw<-d$w/mean(d$w)
+
+d$obs.t1<-rnorm(n.ind, d$t, sqrt(V_m.error))
+d$obs.t2<-rnorm(n.ind, d$t, sqrt(V_m.error))
+d$obs.t3<-rnorm(n.ind, d$t, sqrt(V_m.error))
+
+d$obs.t12<-d$obs.t1^2
+d$obs.t22<-d$obs.t2^2
+d$obs.t32<-d$obs.t3^2
+
+d$obs.x1<-rnorm(n.ind, d$x, sqrt(V_m.error))
+d$obs.x2<-rnorm(n.ind, d$x, sqrt(V_m.error))
+d$obs.x3<-rnorm(n.ind, d$x, sqrt(V_m.error))
+
+d$obs.x12<-d$obs.x1^2
+d$obs.x22<-d$obs.x2^2
+d$obs.x32<-d$obs.x3^2
+
+
+m<-mean(c(d$obs.t1,d$obs.t2,d$obs.t3))
+sd<-sd(c(d$obs.t1,d$obs.t2,d$obs.t3))
+
+m2<-mean(c(d$obs.t12,d$obs.t22,d$obs.t32))
+sd2<-sd(c(d$obs.t12,d$obs.t22,d$obs.t32))
+
+mx<-mean(c(d$obs.x1,d$obs.x2,d$obs.x3))
+sdx<-sd(c(d$obs.x1,d$obs.x2,d$obs.x3))
+
+mx2<-mean(c(d$obs.x12,d$obs.x22,d$obs.x32))
+sdx2<-sd(c(d$obs.x12,d$obs.x22,d$obs.x32))
+
+
+d$obs.z1<-(d$obs.t1-m)/sd
+d$obs.z2<-(d$obs.t2-m)/sd
+d$obs.z3<-(d$obs.t3-m)/sd
+
+d$obs.z12<-(d$obs.t12-m2)/sd2
+d$obs.z22<-(d$obs.t22-m2)/sd2
+d$obs.z32<-(d$obs.t32-m2)/sd2
+
+d$obs.y1<-(d$obs.x1-mx)/sdx
+d$obs.y2<-(d$obs.x2-mx)/sdx
+d$obs.y3<-(d$obs.x3-mx)/sdx
+
+d$obs.y12<-(d$obs.x12-mx2)/sdx2
+d$obs.y22<-(d$obs.x22-mx2)/sdx2
+d$obs.y32<-(d$obs.x32-mx2)/sdx2
+
+d$mean.t<-apply(d[,c("obs.t1", "obs.t2", "obs.t3")],1,mean)
+d$mean.t2<-d$mean.t^2
+d$mean.z<-scale(d$mean.t)
+d$mean.z2<-scale(d$mean.t2)
+
+d$mean.x<-apply(d[,c("obs.x1", "obs.x2", "obs.x3")],1,mean)
+d$mean.x2<-d$mean.x^2
+d$mean.y<-scale(d$mean.x)
+d$mean.y2<-scale(d$mean.x2)
+
+d2.a <- gather(d, obs, t, obs.t1:obs.t3, factor_key=TRUE)
+d2<-d2.a[,c("ID", "w", "t")]
+d2.b <- gather(d, obs, t2, obs.t12:obs.t32, factor_key=TRUE)
+d2.c <- gather(d, obs, x, obs.x1:obs.x3, factor_key=TRUE)
+d2.d <- gather(d, obs, x2, obs.x12:obs.x32, factor_key=TRUE)
+
+d2$t2<-d2.b$t2
+d2$x<-d2.c$x
+d2$x2<-d2.d$x2
+d2$tx<-d2$t*d2$x
+d2$w[(n.ind+1):nrow(d2)]<-NA
+d2$ID<-as.factor(d2$ID)
+
+d$V_m.error<-V_m.error
+d2$V_m.error<-V_m.error
+
+data1[[i+n[j]]]<-d
+data2[[i+n[j]]]<-d2
+}
+}
+
+#save.image("/home/yi/Dropbox/SelectionNiels/datasets3.RData")
+
+```
+
+```{r, label="scenario 3 Analyze data local", include=FALSE, cache=TRUE}
+mod3<-do.call(rbind.data.frame,mclapply(data1, model3, mc.cores=3))
+modmean.3<-do.call(rbind.data.frame,mclapply(data1, model3.mean, mc.cores=3))
+R<-do.call(rbind.data.frame,mclapply(data2, R3, mc.cores=3))
+mod3.corrected<-mod3
+mod3.corrected$model<-"1corrected"
+mod3.corrected$est5<-mod3$est5/sqrt(R$Rtx)
+modmean.3.corrected<-modmean.3
+modmean.3.corrected$model<-"mean.corrected"
+modmean.3.corrected$est5<-modmean.3$est5/sqrt(R$Rtxm)
+```
+
+```{r, label="scenario 3 Analyze data remote", include=FALSE, cache=TRUE}
+
+library(arm)
+library(MCMCglmm)
+library(parallel)
+
+setwd("//tsclient/yi/Dropbox/SelectionNiels")
+load("datasets3.RData")
+cl <- makeCluster(getOption("cl.cores", 12))
+mod1<-do.call(rbind.data.frame, parLapply(cl, data1, model3))
+modmean<-do.call(rbind.data.frame, parLapply(cl, data1, model3.mean))
+modMCMC<-do.call(rbind.data.frame, parLapply(cl, data2, model3.MCMCB))
+
+R<-do.call(rbind.data.frame, parLapply(cl, data2, R3))
+mod1.corrected<-mod1
+mod1.corrected$model<-"1corrected"
+mod1.corrected$est5<-mod1$est5/sqrt(R$Rtx)
+modmean.corrected<-modmean
+modmean.corrected$model<-"mean.corrected"
+modmean.corrected$est5<-modmean$est5/sqrt(R$Rtxm)
+#save.image("Models3.RData")
+
+
+```
+
+```{r, label="Plot scenario 3", echo=FALSE}
+
+load("/home/yi/Dropbox/SelectionNiels/Models3.RData")
+n.ind<-5000000
+V.trait<-c(3)
+mean.trait<-0
+B1_z<-1
+B2_z2<--0.3
+B1_z1z2<-0.3
+
+B1_t<-B1_z/sqrt(V.trait)*2
+B2_t2<-B2_z2/sqrt(2*(V.trait^2 + 2*V.trait*mean.trait^2))*2
+B1_t1t2<-B1_z1z2/sqrt(2*(V.trait^2 + 2*V.trait*mean.trait^2))*2
+
+m<-matrix(NA,2,2)
+m[1,1]<-m[2,2]<-V.trait
+m[1,2]<-m[2,1]<-0
+ts<-mvrnorm(n.ind, c(mean.trait, mean.trait), m)
+  
+d<-data.frame(ID=1:n.ind, t=ts[,1], x=ts[,2])
+d$t2<-d$t^2
+d$x2<-d$x^2
+
+d$z<-scale(d$t)
+d$z2<-scale(d$t2)
+
+d$y<-scale(d$x)
+d$y2<-scale(d$x2)
+
+d$w<- 2 + d$t*B1_t + d$t2*B2_t2 +   d$x*B1_t + d$x2*B2_t2 + B1_t1t2*d$t*d$x-mean(d$t*B1_t + d$t2*B2_t2 +   d$x*B1_t + d$x2*B2_t2 + B1_t1t2*d$t*d$x)
+d$rw<-d$w/mean(d$w)
+
+exp<-coef(lm(rw~z+z2 + y +y2+ y*z, data=d))
+
+simres.3<-rbind(mod1, modmean, mod1.corrected, modmean.corrected, modMCMC)
+simres.3$model2<-as.factor(as.numeric(simres.3$model))
+
+simres.3$bias5<-(simres.3$est5-exp[6])/exp[6]*100
+
+simres.3<-simres.3[complete.cases(simres.3$model),]
+simres.3$Vs<-round(3/(simres.3$Vs+3),1)
+
+p3<-ggplot(simres.3, aes(x=factor(Vs), y=bias5, fill=model)) + 
+ geom_boxplot() +labs(title="", x="Repeatability", y = "% Bias correlational selection", fill="Model") + theme_classic() + geom_hline(yintercept=0, linetype="dashed")  + scale_fill_manual(values=c("white", "grey", "black", "darkblue", "darkgreen"), 
+                       name="Models",
+                       breaks=c("1obs", "Mean", "1corrected", "mean.corrected" ,"Bi.MCMC"),
+                       labels=c("1obs", "Mean", "1corrected", "MeanCorrected" ,"Multivariate"))  + theme(legend.position = "none") + ylim(-250,250)
+p3
+
+```
+
+Plot all together
+
+
+
+ggarrange(p1, p2, p3, ncol=3, nrow=1, legend = NULL, labels="AUTO") 
+
+
